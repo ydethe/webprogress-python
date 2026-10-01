@@ -6,28 +6,28 @@ effect: on each display tick it mirrors the current progress state to the
 webprogress server. Reporting is non-blocking and fault-tolerant — if the
 server is down, slow, or rejecting, the update is silently dropped and the
 tracked task continues unaffected.
+
+The *shape* of each update is decided by a :class:`~webprogress_python.protocol.base.Protocol`
+(spec §6.6): a standalone bar speaks the default protocol, while a bar created
+through a :class:`~webprogress_python.tracker.Tracker` speaks whichever protocol
+the tracker negotiated from the server's ``/version``.
 """
 
 from __future__ import annotations
 
 import getpass
 import socket
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import requests
 from tqdm.std import tqdm as _std_tqdm
 
 from .config import Settings
 from .config import settings as _default_settings
-from .contract import (
-    DEFAULT_COLOUR,
-    DEFAULT_INITIAL,
-    DEFAULT_RATE,
-    ProgressUpdate,
-)
+from .protocol import Protocol, ReportSnapshot, default_protocol
 
-# The update-ingest endpoint (spec §8, architecture §4).
-_INGEST_PATH = "/handler"
+if TYPE_CHECKING:
+    from .tracker import Tracker
 
 # A short send timeout keeps reporting from ever slowing the tracked task
 # beyond this bound (spec §4). Tuple is (connect, read) seconds.
@@ -51,10 +51,16 @@ class tqdm(_std_tqdm):  # noqa: N801 — mirrors tqdm's own lowercase class name
             Defaults to the module-level settings loaded from the environment.
         host: Server base address; overrides ``endpoint.host`` when given.
         key: Credential token; overrides ``endpoint.key`` when given.
+        script: Script the task belongs to (spec §3.1); groups tasks on the
+            dashboard. Defaults to empty ("unscripted").
         report_timeout: Per-send timeout, as seconds or a (connect, read) tuple.
 
     Values supplied directly (``host`` / ``key``) take precedence over
     ``endpoint``, which in turn comes from the environment (spec §5).
+
+    Bars created via :meth:`Tracker.tqdm <webprogress_python.tracker.Tracker.tqdm>`
+    inherit the tracker's resolved configuration, HTTP session, script, and
+    negotiated protocol through the internal ``_tracker`` argument.
     """
 
     def __init__(
@@ -63,17 +69,36 @@ class tqdm(_std_tqdm):  # noqa: N801 — mirrors tqdm's own lowercase class name
         endpoint: Optional[Settings] = None,
         host: Optional[str] = None,
         key: Optional[str] = None,
+        script: str = "",
         report_timeout: Optional[Union[float, tuple]] = None,
+        _tracker: Optional["Tracker"] = None,
         **kwargs,
     ):
-        source = endpoint if endpoint is not None else _default_settings
-        resolved_host = host if host is not None else getattr(source, "host", "")
-        resolved_key = key if key is not None else getattr(source, "key", "")
+        if _tracker is not None:
+            # Driven by a Tracker: share its config, session, script, and the
+            # protocol it already negotiated (spec §6.6). The tracker owns the
+            # session's lifetime, so this bar must not close it.
+            self._wp_host = _tracker._wp_host
+            self._wp_key = _tracker._wp_key
+            self._wp_timeout = _tracker._wp_timeout
+            self._wp_session = _tracker._wp_session
+            self._wp_script = _tracker._script
+            self._wp_protocol = _tracker._protocol
+            self._wp_owns_session = False
+        else:
+            source = endpoint if endpoint is not None else _default_settings
+            resolved_host = host if host is not None else getattr(source, "host", "")
+            resolved_key = key if key is not None else getattr(source, "key", "")
 
-        self._wp_host = (resolved_host or "").rstrip("/")
-        self._wp_key = resolved_key or ""
-        self._wp_timeout = report_timeout if report_timeout is not None else _DEFAULT_TIMEOUT
-        self._wp_session = requests.Session()
+            self._wp_host = (resolved_host or "").rstrip("/")
+            self._wp_key = resolved_key or ""
+            self._wp_timeout = report_timeout if report_timeout is not None else _DEFAULT_TIMEOUT
+            self._wp_session = requests.Session()
+            self._wp_script = script or ""
+            # A standalone bar speaks the current protocol without a handshake;
+            # negotiation is a Tracker concern (spec §4: handshake is optional).
+            self._wp_protocol: Protocol = default_protocol()
+            self._wp_owns_session = True
 
         super().__init__(*args, **kwargs)
 
@@ -91,36 +116,27 @@ class tqdm(_std_tqdm):  # noqa: N801 — mirrors tqdm's own lowercase class name
             self._report()
         return rendered
 
-    def _build_update(self) -> ProgressUpdate:
-        """Capture current progress state as one update message (spec §4.2)."""
-        d = self.format_dict
-        return ProgressUpdate(
+    def _build_payload(self) -> dict:
+        """Capture current state and let the active protocol shape it (§4.2, §6.6)."""
+        snapshot = ReportSnapshot(
             user_hostname=_HOSTNAME,
             user_login=_LOGIN,
-            progress=d.get("n"),
-            total=d.get("total"),
+            script=self._wp_script,
             description=self.desc or "",
-            elapsed=d.get("elapsed"),
-            unit=d.get("unit"),
-            unit_scale=d.get("unit_scale"),
-            # Fallback defaults for values not yet available (spec §4.3).
-            rate=d.get("rate") or DEFAULT_RATE,
-            unit_divisor=d.get("unit_divisor"),
-            initial=d.get("initial") or DEFAULT_INITIAL,
-            colour=self.colour or DEFAULT_COLOUR,
+            colour=self.colour,
             key=self._wp_key,
-            # Reporter leaves this empty; the server stamps it (spec §3.2).
-            user_src_address="",
+            format_dict=self.format_dict,
         )
+        return self._wp_protocol.build_payload(snapshot)
 
     def _report(self) -> None:
         """Send one update, best-effort. Never raises into the tracked task."""
         if not self._wp_host:
             return
         try:
-            payload = self._build_update().to_payload()
+            payload = self._build_payload()
             self._wp_session.post(
-                self._wp_host + _INGEST_PATH,
+                self._wp_host + self._wp_protocol.ingest_path,
                 json=payload,
                 timeout=self._wp_timeout,
             )
@@ -130,14 +146,15 @@ class tqdm(_std_tqdm):  # noqa: N801 — mirrors tqdm's own lowercase class name
             pass
 
     def close(self) -> None:
-        """Close the bar, then release the HTTP session (best-effort)."""
+        """Close the bar, then release the HTTP session if we own it."""
         try:
             super().close()
         finally:
-            try:
-                self._wp_session.close()
-            except Exception:
-                pass
+            if self._wp_owns_session:
+                try:
+                    self._wp_session.close()
+                except Exception:
+                    pass
 
 
 def trange(*args, **kwargs) -> tqdm:

@@ -29,6 +29,9 @@ class ProgressUpdate:
     # --- Display fields (§3.1) ---
     user_hostname: str
     user_login: str
+    # Script the task belongs to; groups tasks on the dashboard and is part of a
+    # task's identity (§6.3). May be empty ("unscripted"). Added at protocol v1.
+    script: str
     progress: int
     total: Optional[int]
     description: str

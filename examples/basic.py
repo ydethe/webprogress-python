@@ -8,14 +8,18 @@ Configure the server via the environment (or a local `.env`) before running:
 
 import time
 
-from webprogress_python import tqdm
+from webprogress_python import Tracker
 from webprogress_python.config import settings
 
 
 # `settings` carries the webprogress server configuration: host and key.
 def test_client():
-    for a in tqdm(range(10), desc="foo", endpoint=settings):
-        time.sleep(1)
+    with Tracker(script="basic.py", endpoint=settings) as t:
+        for a in t.tqdm(range(10), desc="foo"):
+            time.sleep(1)
+
+        for a in t.tqdm(range(10), desc="bar"):
+            time.sleep(1)
 
 
 if __name__ in {"__main__", "__mp_main__"}:
