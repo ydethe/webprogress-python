@@ -1,6 +1,10 @@
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
 [project]
 name = "webprogress_python"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Progress reporter client for webprogress: a tqdm drop-in that mirrors progress to a webprogress server."
 readme = "README.md"
 requires-python = ">=3.12"
