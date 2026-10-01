@@ -15,10 +15,10 @@ from webprogress_python.config import settings
 # `settings` carries the webprogress server configuration: host and key.
 def test_client():
     with Tracker(script="basic.py", endpoint=settings) as t:
-        for a in t.tqdm(range(10), desc="foo"):
+        for a in t.tqdm(range(10), desc="foo", tags=["test"]):
             time.sleep(1)
 
-        for a in t.tqdm(range(10), desc="bar"):
+        for a in t.tqdm(range(10), desc="bar", tags=["test", "poney"]):
             time.sleep(1)
 
 

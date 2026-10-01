@@ -10,6 +10,7 @@ import pytest
 from webprogress_python import Tracker, tqdm
 from webprogress_python.config import Settings
 from webprogress_python.contract import DEFAULT_COLOUR
+from webprogress_python.protocol import UnsupportedProtocolWarning
 
 CONTRACT_FIELDS = {
     "user_hostname",
@@ -28,6 +29,12 @@ CONTRACT_FIELDS = {
     "user_src_address",
     "key",
 }
+
+# Protocol v2 adds one optional display field (spec §3.1).
+CONTRACT_FIELDS_V2 = CONTRACT_FIELDS | {"tags"}
+
+# Protocol v3 adds the reporter-assigned per-run uuid (spec §3.1).
+CONTRACT_FIELDS_V3 = CONTRACT_FIELDS_V2 | {"uuid"}
 
 
 @pytest.fixture
@@ -185,3 +192,181 @@ def test_tracker_dead_server_does_not_break_loop():
         count = sum(1 for _ in t.tqdm(range(5), desc="d"))
     assert count == 5
     assert time.time() - start < 3.0
+
+
+def _version_server(protocol: int):
+    """Spin up a server advertising `protocol` on GET /version; records POSTs."""
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/version":
+                body = json.dumps(
+                    {"name": "webprogress", "version": "test", "protocol": protocol}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            received.append((self.path, json.loads(self.rfile.read(n) or b"{}")))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    host = f"http://127.0.0.1:{srv.server_address[1]}"
+    return srv, host, received
+
+
+@pytest.fixture
+def versioned_server_v2():
+    """A server that advertises protocol 2 and records POSTed updates."""
+    srv, host, received = _version_server(2)
+    yield host, received
+    srv.shutdown()
+
+
+def test_tracker_negotiates_v2_and_emits_new_fields(versioned_server_v2):
+    host, received = versioned_server_v2
+    settings = Settings(host=host, key="tok-v2")
+
+    with Tracker(script="train.py", endpoint=settings, tags=["gpu", "nightly"]) as t:
+        assert t.protocol_version == 2  # negotiated from GET /version
+        for _ in t.tqdm(range(3), desc="epoch"):
+            pass
+    time.sleep(0.1)
+
+    assert received, "expected at least one update"
+    last = received[-1][1]
+    assert set(last.keys()) == CONTRACT_FIELDS_V2  # tags present
+    assert last["tags"] == ["gpu", "nightly"]
+    assert last["script"] == "train.py"
+
+
+def test_tracker_merges_run_and_bar_tags(versioned_server_v2):
+    host, received = versioned_server_v2
+    with Tracker(host=host, key="k", tags=["gpu", "nightly"]) as t:
+        # Bar adds its own tag; the shared "gpu" collapses, order preserved.
+        for _ in t.tqdm(range(2), desc="d", tags=["gpu", "batch-7"]):
+            pass
+    time.sleep(0.1)
+    assert received[-1][1]["tags"] == ["gpu", "nightly", "batch-7"]
+
+
+def test_v1_server_omits_v2_fields(versioned_server):
+    # A v1 server must never receive the optional v2 fields (spec §3.1).
+    host, received = versioned_server
+    with Tracker(host=host, key="k", tags=["gpu"]) as t:
+        assert t.protocol_version == 1
+        for _ in t.tqdm(range(2), desc="d"):
+            pass
+    time.sleep(0.1)
+    last = received[-1][1]
+    assert set(last.keys()) == CONTRACT_FIELDS
+    assert "tags" not in last
+
+
+@pytest.fixture
+def versioned_server_v3():
+    """A server that advertises protocol 3 and records POSTed updates."""
+    srv, host, received = _version_server(3)
+    yield host, received
+    srv.shutdown()
+
+
+def test_tracker_negotiates_v3_and_emits_uuid(versioned_server_v3):
+    host, received = versioned_server_v3
+    settings = Settings(host=host, key="tok-v3")
+
+    with Tracker(script="train.py", endpoint=settings, tags=["gpu"]) as t:
+        assert t.protocol_version == 3  # negotiated from GET /version
+        for _ in t.tqdm(range(3), desc="epoch"):
+            pass
+    time.sleep(0.1)
+
+    assert received, "expected at least one update"
+    last = received[-1][1]
+    assert set(last.keys()) == CONTRACT_FIELDS_V3  # tags and uuid present
+    assert last["script"] == "train.py"
+    assert last["tags"] == ["gpu"]
+    # The uuid is a non-empty reporter-assigned run identity (spec §3.1/§6.3).
+    assert last["uuid"]
+
+
+def test_v3_uuid_is_stable_within_a_run(versioned_server_v3):
+    # One bar is one run: every tick carries the same uuid (spec §6.3).
+    host, received = versioned_server_v3
+    with Tracker(host=host, key="k") as t:
+        for _ in t.tqdm(range(4), desc="d"):
+            pass
+    time.sleep(0.1)
+    uuids = {payload["uuid"] for _, payload in received}
+    assert len(uuids) == 1  # stable across the run's ticks
+
+
+def test_v3_distinct_runs_get_distinct_uuids(versioned_server_v3):
+    # A restarted task (a new bar) mints a fresh uuid, so the server opens a new
+    # dashboard card rather than reviving the old run (spec §6.3).
+    host, received = versioned_server_v3
+    with Tracker(host=host, key="k") as t:
+        for _ in t.tqdm(range(2), desc="d"):
+            pass
+        for _ in t.tqdm(range(2), desc="d"):
+            pass
+    time.sleep(0.1)
+    uuids = {payload["uuid"] for _, payload in received}
+    assert len(uuids) == 2  # one per run
+
+
+def test_v2_server_omits_v3_uuid(versioned_server_v2):
+    # A v2 server must never receive the v3 uuid field (spec §3.1).
+    host, received = versioned_server_v2
+    with Tracker(host=host, key="k", tags=["gpu"]) as t:
+        assert t.protocol_version == 2
+        for _ in t.tqdm(range(2), desc="d"):
+            pass
+    time.sleep(0.1)
+    last = received[-1][1]
+    assert set(last.keys()) == CONTRACT_FIELDS_V2
+    assert "uuid" not in last
+
+
+@pytest.fixture
+def versioned_server_unsupported():
+    """A server advertising a protocol version this client does not implement."""
+    srv, host, received = _version_server(99)
+    yield host, received
+    srv.shutdown()
+
+
+def test_unsupported_protocol_warns_and_sends_nothing(versioned_server_unsupported):
+    host, received = versioned_server_unsupported
+
+    with pytest.warns(UnsupportedProtocolWarning, match="protocol version 99"):
+        with Tracker(host=host, key="k") as t:
+            assert t.protocol_version == 99  # the advertised, unsupported version
+            for _ in t.tqdm(range(5), desc="d"):
+                pass
+    time.sleep(0.2)
+
+    # Reporting is disabled under an unsupported protocol: no updates reach /handler.
+    assert received == []
+
+
+def test_unsupported_protocol_does_not_break_loop(versioned_server_unsupported):
+    host, _received = versioned_server_unsupported
+    with pytest.warns(UnsupportedProtocolWarning):
+        with Tracker(host=host, key="k") as t:
+            count = sum(1 for _ in t.tqdm(range(5), desc="d"))
+    assert count == 5  # the tracked task runs unaffected

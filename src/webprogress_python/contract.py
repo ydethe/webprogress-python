@@ -9,7 +9,7 @@ that touches both sides at once.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 # Fallback defaults applied when a value is not yet available (spec §4.3).
 DEFAULT_RATE = 0.0
@@ -33,7 +33,7 @@ class ProgressUpdate:
     # task's identity (§6.3). May be empty ("unscripted"). Added at protocol v1.
     script: str
     progress: int
-    total: Optional[int]
+    total: int | None
     description: str
     elapsed: float
     unit: str
@@ -51,6 +51,31 @@ class ProgressUpdate:
     # received request and it is authoritative only when set by the server.
     user_src_address: str = field(default="")
 
+    # --- Display fields added at protocol v2 (§3.1) ---
+    # Free-form labels shown as chips on the dashboard; not part of a task's
+    # identity. A pre-v2 reporter omits the field entirely (see ``to_payload``).
+    tags: list[str] | None = None
+
+    # --- Display fields added at protocol v3 (§3.1) ---
+    # Reporter-assigned identity of this particular run of the task (one value
+    # per run, §6.3): the server draws one dashboard card per uuid, so a
+    # restarted task sending a new uuid opens a fresh card. A pre-v3 reporter
+    # omits the field entirely (see ``to_payload``).
+    uuid: str | None = None
+
     def to_payload(self) -> dict:
-        """Serialize to the JSON-ready dict sent to the server."""
-        return asdict(self)
+        """Serialize to the JSON-ready dict sent to the server.
+
+        Fields added after v1 are dropped entirely when left unset, so an older
+        reporter emits exactly the message shape its version speaks: ``tags``
+        (v2) and ``uuid`` (v3) each vanish when ``None``. A v1 reporter populates
+        neither and so emits the pre-v2 shape; a v2 reporter sets ``tags`` (an
+        empty tag list is still sent explicitly) but not ``uuid``; a v3 reporter
+        sets both.
+        """
+        payload = asdict(self)
+        if self.tags is None:
+            del payload["tags"]
+        if self.uuid is None:
+            del payload["uuid"]
+        return payload

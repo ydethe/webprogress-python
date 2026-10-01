@@ -19,6 +19,7 @@ The handshake is best-effort: if the server is unreachable or does not advertise
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Optional, Union
 
 import requests
@@ -26,6 +27,7 @@ import requests
 from .config import Settings
 from .config import settings as _default_settings
 from .protocol import Protocol, default_protocol, negotiate
+from .reporter import _merge_tags
 from .reporter import tqdm as _tqdm
 
 _DEFAULT_TIMEOUT: tuple = (1.0, 1.0)
@@ -41,6 +43,8 @@ class Tracker:
         script: Script the grouped tasks belong to (spec §3.1).
         endpoint: Settings-like object exposing ``host`` and ``key``.
         host / key: Direct overrides for the server address and credential.
+        tags: Run-wide tags (spec §3.1) applied to every bar; each bar's own
+            tags are merged on top. Emitted only once a v2 server is negotiated.
         report_timeout: Per-send timeout, as seconds or a (connect, read) tuple;
             also bounds the handshake request.
     """
@@ -52,6 +56,7 @@ class Tracker:
         endpoint: Optional[Settings] = None,
         host: Optional[str] = None,
         key: Optional[str] = None,
+        tags: Optional[Iterable[str]] = None,
         report_timeout: Optional[Union[float, tuple]] = None,
     ):
         source = endpoint if endpoint is not None else _default_settings
@@ -63,6 +68,7 @@ class Tracker:
         self._wp_key = resolved_key or ""
         self._wp_timeout = report_timeout if report_timeout is not None else _DEFAULT_TIMEOUT
         self._wp_session = requests.Session()
+        self._tags: list[str] = _merge_tags(tags)
         # Replaced by the negotiated protocol on __enter__; a sensible default
         # so bars built outside a ``with`` block still work.
         self._protocol: Protocol = default_protocol()
