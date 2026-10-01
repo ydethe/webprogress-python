@@ -1,0 +1,32 @@
+# Go build output
+/webprogress
+webprogress-bin
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pdm-build
+.pytest_cache
+.claude
+
+# Virtual environments
+.venv
+.env
+*.xlsx
+.python-version
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.parquet
+htmldoc/
+.coverage
+.output/
+.cache
+.registry
