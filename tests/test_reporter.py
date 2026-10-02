@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from webprogress_python import Tracker, tqdm
+from webprogress_python import Criticity, Tracker, tqdm
 from webprogress_python.config import Settings
 from webprogress_python.contract import DEFAULT_COLOUR
 from webprogress_python.protocol import UnsupportedProtocolWarning
@@ -35,6 +35,9 @@ CONTRACT_FIELDS_V2 = CONTRACT_FIELDS | {"tags"}
 
 # Protocol v3 adds the reporter-assigned per-run uuid (spec §3.1).
 CONTRACT_FIELDS_V3 = CONTRACT_FIELDS_V2 | {"uuid"}
+
+# Protocol v4 adds the reporting library and the task criticity (spec §3.1).
+CONTRACT_FIELDS_V4 = CONTRACT_FIELDS_V3 | {"library", "library_version", "criticity"}
 
 
 @pytest.fixture
@@ -340,6 +343,91 @@ def test_v2_server_omits_v3_uuid(versioned_server_v2):
     last = received[-1][1]
     assert set(last.keys()) == CONTRACT_FIELDS_V2
     assert "uuid" not in last
+
+
+@pytest.fixture
+def versioned_server_v4():
+    """A server that advertises protocol 4 and records POSTed updates."""
+    srv, host, received = _version_server(4)
+    yield host, received
+    srv.shutdown()
+
+
+def test_tracker_negotiates_v4_and_emits_library_and_criticity(versioned_server_v4):
+    host, received = versioned_server_v4
+    settings = Settings(host=host, key="tok-v4")
+
+    with Tracker(script="train.py", endpoint=settings, tags=["gpu"], criticity="critical") as t:
+        assert t.protocol_version == 4  # negotiated from GET /version
+        for _ in t.tqdm(range(3), desc="epoch"):
+            pass
+    time.sleep(0.1)
+
+    assert received, "expected at least one update"
+    last = received[-1][1]
+    assert set(last.keys()) == CONTRACT_FIELDS_V4  # library trio present
+    assert last["script"] == "train.py"
+    assert last["tags"] == ["gpu"]
+    assert last["uuid"]  # v3 field still carried
+    assert last["library"] == "webprogress"  # the reporting client (spec §3.1)
+    assert isinstance(last["library_version"], str)  # the installed version
+    assert last["criticity"] == "critical"
+
+
+def test_v4_criticity_defaults_to_standard(versioned_server_v4):
+    # An unset criticity is sent as the default level (spec §3.1).
+    host, received = versioned_server_v4
+    with Tracker(host=host, key="k") as t:
+        for _ in t.tqdm(range(2), desc="d"):
+            pass
+    time.sleep(0.1)
+    assert received[-1][1]["criticity"] == "standard"
+
+
+def test_v4_unknown_criticity_falls_back_to_standard(versioned_server_v4):
+    # An unrecognised criticity is normalised to the default (spec §3.1).
+    host, received = versioned_server_v4
+    with Tracker(host=host, key="k", criticity="bogus") as t:
+        for _ in t.tqdm(range(2), desc="d"):
+            pass
+    time.sleep(0.1)
+    assert received[-1][1]["criticity"] == "standard"
+
+
+def test_v4_bar_criticity_overrides_tracker(versioned_server_v4):
+    # A bar's own criticity takes precedence over the tracker's run-wide one.
+    host, received = versioned_server_v4
+    with Tracker(host=host, key="k", criticity="trivial") as t:
+        for _ in t.tqdm(range(2), desc="d", criticity="critical"):
+            pass
+    time.sleep(0.1)
+    assert received[-1][1]["criticity"] == "critical"
+
+
+def test_v4_criticity_accepts_criticity_enum(versioned_server_v4):
+    # A Criticity enum member is accepted on both the tracker and the bar, and
+    # is serialised to its plain wire string (spec §3.1).
+    host, received = versioned_server_v4
+    with Tracker(host=host, key="k", criticity=Criticity.TRIVIAL) as t:
+        for _ in t.tqdm(range(2), desc="d", criticity=Criticity.CRITICAL):
+            pass
+    time.sleep(0.1)
+    assert received[-1][1]["criticity"] == "critical"
+
+
+def test_v3_server_omits_v4_fields(versioned_server_v3):
+    # A v3 server must never receive the v4 library/criticity fields (spec §3.1).
+    host, received = versioned_server_v3
+    with Tracker(host=host, key="k", criticity="critical") as t:
+        assert t.protocol_version == 3
+        for _ in t.tqdm(range(2), desc="d"):
+            pass
+    time.sleep(0.1)
+    last = received[-1][1]
+    assert set(last.keys()) == CONTRACT_FIELDS_V3
+    assert "library" not in last
+    assert "library_version" not in last
+    assert "criticity" not in last
 
 
 @pytest.fixture

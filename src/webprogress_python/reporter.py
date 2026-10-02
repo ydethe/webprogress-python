@@ -26,6 +26,7 @@ from tqdm.std import tqdm as _std_tqdm
 
 from .config import Settings
 from .config import settings as _default_settings
+from .contract import LIBRARY_NAME, Criticity, library_version, normalize_criticity
 from .protocol import Protocol, ReportSnapshot, default_protocol
 
 if TYPE_CHECKING:
@@ -37,6 +38,8 @@ _DEFAULT_TIMEOUT: tuple = (1.0, 1.0)
 
 # Cheap to compute once per process; stable for the program's lifetime.
 _HOSTNAME = socket.gethostname()
+# Reporting client identity (spec §3.1, protocol v4); resolved once at import.
+_LIBRARY_VERSION = library_version()
 try:
     _LOGIN = getpass.getuser()
 except Exception:  # getuser can raise if no account info is available
@@ -74,6 +77,13 @@ class tqdm(_std_tqdm):  # noqa: N801 — mirrors tqdm's own lowercase class name
         tags: Free-form labels attached to the task (spec §3.1), shown as chips
             on the dashboard. Only emitted once a v2 server has been negotiated.
             A tracker-driven bar merges these with the tracker's own tags.
+        criticity: Importance of the task (spec §3.1), as a
+            :class:`~webprogress_python.contract.Criticity` member (or the
+            equivalent string): ``Criticity.TRIVIAL``, ``Criticity.STANDARD``,
+            or ``Criticity.CRITICAL``, gating its out-of-band notifications
+            (§6.7). An unrecognised value falls back to ``Criticity.STANDARD``.
+            Only emitted once a v4 server has been negotiated. A tracker-driven
+            bar inherits the tracker's criticity unless it sets its own.
         report_timeout: Per-send timeout, as seconds or a (connect, read) tuple.
 
     Values supplied directly (``host`` / ``key``) take precedence over
@@ -92,6 +102,7 @@ class tqdm(_std_tqdm):  # noqa: N801 — mirrors tqdm's own lowercase class name
         key: None | str = None,
         script: str = "",
         tags: None | Iterable[str] = None,
+        criticity: None | Criticity | str = None,
         report_timeout: None | float | tuple = None,
         _tracker: None | "Tracker" = None,
         **kwargs,
@@ -110,6 +121,9 @@ class tqdm(_std_tqdm):  # noqa: N801 — mirrors tqdm's own lowercase class name
             # Tags are additive: the bar's own tags join the tracker's run-wide
             # tags (spec §3.1).
             self._wp_tags = _merge_tags(_tracker._tags, tags)
+            # Criticity is a single value: the bar's own choice overrides the
+            # tracker's run-wide one, which in turn defaults to standard (§3.1).
+            self._wp_criticity = criticity if criticity is not None else _tracker._criticity
         else:
             source = endpoint if endpoint is not None else _default_settings
             resolved_host = host if host is not None else getattr(source, "host", "")
@@ -125,6 +139,7 @@ class tqdm(_std_tqdm):  # noqa: N801 — mirrors tqdm's own lowercase class name
             self._wp_protocol: Protocol = default_protocol()
             self._wp_owns_session = True
             self._wp_tags = _merge_tags(tags)
+            self._wp_criticity = normalize_criticity(criticity)
 
         # Identity of this run (spec §3.1/§6.3): one uuid per bar, minted here and
         # sent unchanged on every tick. A new bar — e.g. a restarted task — mints a
@@ -165,6 +180,10 @@ class tqdm(_std_tqdm):  # noqa: N801 — mirrors tqdm's own lowercase class name
             format_dict=self.format_dict,
             tags=self._wp_tags,
             uuid=self._wp_uuid,
+            # v4 reporting identity and task importance (spec §3.1).
+            library=LIBRARY_NAME,
+            library_version=_LIBRARY_VERSION,
+            criticity=self._wp_criticity,
         )
         return self._wp_protocol.build_payload(snapshot)
 

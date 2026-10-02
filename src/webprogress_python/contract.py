@@ -9,12 +9,60 @@ that touches both sides at once.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from enum import Enum
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from typing import Any
 
 # Fallback defaults applied when a value is not yet available (spec §4.3).
 DEFAULT_RATE = 0.0
 DEFAULT_INITIAL = 0
 DEFAULT_COLOUR = "#0000ff"  # standard blue
+
+# Identity of this reporting client library (spec §3.1, protocol v4): the
+# dashboard shows it as the chip ``library@library_version``.
+LIBRARY_NAME = "webprogress"
+
+
+# The task's importance, which gates its out-of-band notifications (spec §3.1,
+# §6.7, protocol v4). An absent or unrecognised value falls back to the default.
+class Criticity(str, Enum):
+    """A task's importance, which gates its out-of-band notifications (spec §3.1, §6.7).
+
+    A ``str`` enum, so a member compares and serializes as its wire value: e.g.
+    ``Criticity.CRITICAL == "critical"`` and it JSON-encodes to ``"critical"``.
+    """
+
+    TRIVIAL = "trivial"
+    STANDARD = "standard"
+    CRITICAL = "critical"
+
+
+# The valid wire levels and the default, derived from the enum so there is a
+# single source of truth. Both are plain strings — the shape sent on the wire.
+CRITICITY_LEVELS = tuple(level.value for level in Criticity)
+DEFAULT_CRITICITY = Criticity.STANDARD.value
+
+
+def library_version() -> str:
+    """Version of this installed client library (spec §3.1); empty if unknown."""
+    try:
+        return _pkg_version("webprogress_python")
+    except PackageNotFoundError:
+        return ""
+
+
+def normalize_criticity(value: Criticity | str | None) -> str:
+    """Map a criticity to a valid level string, defaulting unknown ones (spec §3.1).
+
+    Accepts a :class:`Criticity` member or its string value; anything else
+    (including ``None`` or an unrecognised string) falls back to the default.
+    """
+    if isinstance(value, Criticity):
+        return value.value
+    if value in CRITICITY_LEVELS:
+        return value
+    return DEFAULT_CRITICITY
 
 
 @dataclass
@@ -63,19 +111,31 @@ class ProgressUpdate:
     # omits the field entirely (see ``to_payload``).
     uuid: str | None = None
 
+    # --- Display fields added at protocol v4 (§3.1) ---
+    # Name and version of the reporting client library, shown together as the
+    # chip ``library@library_version``; not part of a task's identity. A pre-v4
+    # reporter omits both fields entirely (see ``to_payload``).
+    library: str | None = None
+    library_version: str | None = None
+    # Importance of the task (``trivial`` / ``standard`` / ``critical``), which
+    # gates its out-of-band notifications (§6.7); not part of a task's identity.
+    # A pre-v4 reporter omits the field, and the server falls back to the default
+    # ``standard``.
+    criticity: str | None = None
+
     def to_payload(self) -> dict:
         """Serialize to the JSON-ready dict sent to the server.
 
         Fields added after v1 are dropped entirely when left unset, so an older
         reporter emits exactly the message shape its version speaks: ``tags``
-        (v2) and ``uuid`` (v3) each vanish when ``None``. A v1 reporter populates
-        neither and so emits the pre-v2 shape; a v2 reporter sets ``tags`` (an
-        empty tag list is still sent explicitly) but not ``uuid``; a v3 reporter
-        sets both.
+        (v2), ``uuid`` (v3), and ``library`` / ``library_version`` / ``criticity``
+        (v4) each vanish when ``None``. A v1 reporter populates none of them and so
+        emits the pre-v2 shape; a v2 reporter sets ``tags`` (an empty tag list is
+        still sent explicitly) only; a v3 reporter also sets ``uuid``; a v4 reporter
+        additionally sets the three v4 fields.
         """
         payload = asdict(self)
-        if self.tags is None:
-            del payload["tags"]
-        if self.uuid is None:
-            del payload["uuid"]
+        for name in ("tags", "uuid", "library", "library_version", "criticity"):
+            if getattr(self, name) is None:
+                del payload[name]
         return payload

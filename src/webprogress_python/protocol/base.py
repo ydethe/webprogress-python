@@ -25,9 +25,10 @@ class ReportSnapshot:
     of these to emit, in what shape, and which defaults to apply. ``format_dict``
     is tqdm's own progress snapshot (``n``, ``total``, ``elapsed``, ``rate``, …).
 
-    ``tags`` was added with protocol v2 (spec §3.1) and ``uuid`` with protocol v3
-    (the reporter-assigned per-run identity, §3.1/§6.3); older protocols simply
-    ignore the fields their version does not speak.
+    ``tags`` was added with protocol v2 (spec §3.1), ``uuid`` with protocol v3
+    (the reporter-assigned per-run identity, §3.1/§6.3), and ``library`` /
+    ``library_version`` / ``criticity`` with protocol v4 (§3.1); older protocols
+    simply ignore the fields their version does not speak.
     """
 
     user_hostname: str
@@ -39,6 +40,9 @@ class ReportSnapshot:
     format_dict: Mapping
     tags: list[str] = field(default_factory=list)
     uuid: str = ""
+    library: str = ""
+    library_version: str = ""
+    criticity: str = "standard"
 
 
 class Protocol(ABC):

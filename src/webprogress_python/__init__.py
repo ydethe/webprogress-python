@@ -23,7 +23,8 @@ under one ``script`` and negotiates the server's wire protocol once (spec §6.6)
 """
 
 from .config import Settings, settings
+from .contract import Criticity
 from .reporter import tqdm, trange
 from .tracker import Tracker
 
-__all__ = ["Settings", "settings", "Tracker", "tqdm", "trange"]
+__all__ = ["Settings", "settings", "Tracker", "Criticity", "tqdm", "trange"]

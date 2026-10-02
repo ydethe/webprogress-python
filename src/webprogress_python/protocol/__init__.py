@@ -25,6 +25,7 @@ from .base import Protocol, ReportSnapshot
 from .v1 import ProtocolV1
 from .v2 import ProtocolV2
 from .v3 import ProtocolV3
+from .v4 import ProtocolV4
 
 # The server's version-handshake endpoint (spec §8).
 _VERSION_PATH = "/version"
@@ -36,6 +37,7 @@ _PROTOCOLS: dict[int, type[Protocol]] = {
     1: ProtocolV1,
     2: ProtocolV2,
     3: ProtocolV3,
+    4: ProtocolV4,
 }
 
 # Version spoken when no handshake has happened (or it failed): a standalone bar,
@@ -52,6 +54,7 @@ __all__ = [
     "ProtocolV1",
     "ProtocolV2",
     "ProtocolV3",
+    "ProtocolV4",
     "ReportSnapshot",
     "UnsupportedProtocolWarning",
     "default_protocol",

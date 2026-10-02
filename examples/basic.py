@@ -8,7 +8,7 @@ Configure the server via the environment (or a local `.env`) before running:
 
 import time
 
-from webprogress_python import Tracker
+from webprogress_python import Criticity, Tracker
 from webprogress_python.config import settings
 
 
@@ -18,7 +18,9 @@ def test_client():
         for a in t.tqdm(range(10), desc="foo", tags=["test"]):
             time.sleep(1)
 
-        for a in t.tqdm(range(10), desc="bar", tags=["test", "poney"]):
+        for a in t.tqdm(
+            range(10), desc="bar", tags=["test", "poney"], criticity=Criticity.CRITICAL
+        ):
             time.sleep(1)
 
 
